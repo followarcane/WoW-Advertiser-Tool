@@ -27,16 +27,7 @@ jobs:
         
     - name: Build with PyInstaller
       run: |
-        pyinstaller --onefile --windowed --name="WoW Advertiser" ^
-        --clean ^
-        --noupx ^
-        --disable-windowed-traceback ^
-        --add-binary "venv/Lib/site-packages/PyQt6/Qt6/bin/*;PyQt6/Qt6/bin/" ^
-        --hidden-import win32api ^
-        --hidden-import win32con ^
-        --hidden-import win32gui ^
-        --hidden-import win32process ^
-        PyroMacro.py
+        pyinstaller --onefile --windowed --name="WoW Advertiser" --clean --noupx --disable-windowed-traceback --hidden-import win32api --hidden-import win32con --hidden-import win32gui --hidden-import win32process PyroMacro.py
         
     - name: Upload artifact
       uses: actions/upload-artifact@v4
