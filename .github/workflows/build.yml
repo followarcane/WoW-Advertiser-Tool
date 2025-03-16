@@ -32,5 +32,5 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: WoW-Advertiser
-        path: dist/WoW Advertiser.exe
+        name: Pyro-RVN-Tool
+        path: dist/Pyro RVN Tool.exe
