@@ -8,7 +8,7 @@ import win32con
 import win32api
 import win32process
 import ctypes
-from ctypes import wintypes
+from ctypes import wintypes, CFUNCTYPE, POINTER
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QPushButton, QLabel, QSpinBox, 
                            QLineEdit, QGroupBox, QGridLayout, QDialog, 
@@ -16,18 +16,51 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QProgressBar, QTextEdit)
 from PyQt6.QtCore import Qt, QTimer
 
+# Keyboard hook için gerekli yapılar
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN = 0x0100
+LRESULT = ctypes.c_long
+WPARAM = ctypes.c_ulonglong
+LPARAM = ctypes.c_ulonglong
+
+# Keyboard hook callback tipi
+HOOKPROC = CFUNCTYPE(LRESULT, ctypes.c_int, WPARAM, LPARAM)
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_void_p)
+    ]
+
 class WindowsAPI:
     def __init__(self, main_window):
         self.main_window = main_window
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
         self._hooks = {}  # window_title: hook_id
+        self._hook_callbacks = {}  # window_title: callback_function
+
+    def _key_to_vk(self, key):
+        # F tuşları için özel işlem
+        if key.upper().startswith('F') and len(key) <= 3:
+            try:
+                f_num = int(key[1:])
+                if 1 <= f_num <= 24:  # F1-F24
+                    return win32con.VK_F1 + f_num - 1
+            except ValueError:
+                pass
+        
+        # Normal tuşlar için
+        return ord(key.upper())
 
     def send_key(self, window_title, key):
         try:
             hwnd = win32gui.FindWindow(None, window_title)
             if hwnd:
-                vk_code = ord(key.upper())
+                vk_code = self._key_to_vk(key)
                 win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, vk_code, 0)
                 win32api.PostMessage(hwnd, win32con.WM_KEYUP, vk_code, 0)
                 self.main_window.log(f"Tuş gönderildi: {key} -> {window_title}")
@@ -41,18 +74,31 @@ class WindowsAPI:
         try:
             hwnd = win32gui.FindWindow(None, window_title)
             if hwnd:
-                # Hook kurulumu
-                thread_id = win32process.GetWindowThreadProcessId(hwnd)[0]
+                # Hook callback fonksiyonu
+                def hook_callback(nCode, wParam, lParam):
+                    if nCode >= 0 and wParam == WM_KEYDOWN:
+                        return self.user32.CallNextHookEx(None, nCode, wParam, lParam)
+                    return self.user32.CallNextHookEx(None, nCode, wParam, lParam)
+                
+                # Callback'i sakla (garbage collection'dan korumak için)
+                callback = HOOKPROC(hook_callback)
+                self._hook_callbacks[window_title] = callback
+                
+                # Hook'u kur
                 hook_id = self.user32.SetWindowsHookExA(
-                    win32con.WH_KEYBOARD_LL,
-                    self._hook_callback,
+                    WH_KEYBOARD_LL,
+                    callback,
                     None,
-                    thread_id
+                    0  # Global hook için 0
                 )
+                
                 if hook_id:
                     self._hooks[window_title] = hook_id
                     self.main_window.log(f"Hook kuruldu: {window_title}")
                     return True
+                else:
+                    error = ctypes.WinError()
+                    self.main_window.log(f"Hook kurma hatası: {error}")
             return False
         except Exception as e:
             self.main_window.log(f"Hook kurma hatası: {e}")
@@ -64,16 +110,14 @@ class WindowsAPI:
             if hook_id:
                 if self.user32.UnhookWindowsHookEx(hook_id):
                     del self._hooks[window_title]
+                    if window_title in self._hook_callbacks:
+                        del self._hook_callbacks[window_title]
                     self.main_window.log(f"Hook kaldırıldı: {window_title}")
                     return True
             return False
         except Exception as e:
             self.main_window.log(f"Hook kaldırma hatası: {e}")
             return False
-
-    def _hook_callback(self, nCode, wParam, lParam):
-        # Hook callback fonksiyonu gerekirse buraya eklenecek
-        return self.user32.CallNextHookEx(None, nCode, wParam, lParam)
 
 class WowClient:
     def __init__(self, window_title, pid, windows_api):
@@ -161,7 +205,7 @@ class ClientControl(QGroupBox):
         self.timer.timeout.connect(self.update_progress)
 
     def setup_ui(self):
-        self.setTitle(f"Client: {self.client.window_title}")
+        self.setTitle(f"Client: {self.client.window_title} (PID: {self.client.pid})")
         layout = QVBoxLayout()
         layout.setSpacing(5)
 
@@ -169,8 +213,8 @@ class ClientControl(QGroupBox):
         key_layout = QHBoxLayout()
         key_layout.addWidget(QLabel("Tuş:"))
         self.key_input = QLineEdit(self.client.key)
-        self.key_input.setMaxLength(1)
-        self.key_input.setFixedWidth(30)
+        self.key_input.setMaxLength(3)  # F10 gibi tuşlar için 3 karakter
+        self.key_input.setFixedWidth(50)  # Biraz daha geniş
         key_layout.addWidget(self.key_input)
         key_layout.addStretch()
         layout.addLayout(key_layout)
@@ -290,14 +334,16 @@ class ProcessSelector(QDialog):
         self.process_list.clear()
         for proc in psutil.process_iter(['pid', 'name']):
             try:
-                if 'Wow' in proc.info['name'] or 'wow' in proc.info['name']:
+                # WoW veya benzer isimli processleri bul
+                if 'wow' in proc.info['name'].lower() or 'world' in proc.info['name'].lower():
                     pid = proc.info['pid']
                     hwnd = None
                     
                     def callback(h, extra):
                         if win32process.GetWindowThreadProcessId(h)[1] == pid:
-                            extra[0] = h
-                            return False
+                            if win32gui.IsWindowVisible(h):
+                                extra[0] = h
+                                return False
                         return True
                     
                     extra = [None]
@@ -393,7 +439,7 @@ class MainWindow(QMainWindow):
                     row = idx // 3
                     col = idx % 3
                     self.grid_layout.addWidget(control, row, col)
-                    self.log(f"Client eklendi: {process[0]}")
+                    self.log(f"Client eklendi: {process[0]} (PID: {process[1]})")
         except Exception as e:
             self.log(f"Client ekleme hatası: {e}")
 
