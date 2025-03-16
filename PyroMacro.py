@@ -9,7 +9,7 @@ import win32api
 import win32process
 import ctypes
 import traceback
-from ctypes import wintypes, CFUNCTYPE, POINTER
+from ctypes import wintypes
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QPushButton, QLabel, QSpinBox, 
                            QLineEdit, QGroupBox, QGridLayout, QDialog, 
@@ -17,32 +17,12 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QProgressBar, QTextEdit)
 from PyQt6.QtCore import Qt, QTimer
 
-# Keyboard hook için gerekli yapılar
-WH_KEYBOARD_LL = 13
-WM_KEYDOWN = 0x0100
-LRESULT = ctypes.c_long
-WPARAM = ctypes.c_ulonglong
-LPARAM = ctypes.c_ulonglong
-
-# Keyboard hook callback tipi
-HOOKPROC = CFUNCTYPE(LRESULT, ctypes.c_int, WPARAM, LPARAM)
-
-class KBDLLHOOKSTRUCT(ctypes.Structure):
-    _fields_ = [
-        ("vkCode", wintypes.DWORD),
-        ("scanCode", wintypes.DWORD),
-        ("flags", wintypes.DWORD),
-        ("time", wintypes.DWORD),
-        ("dwExtraInfo", ctypes.c_void_p)
-    ]
-
 class WindowsAPI:
     def __init__(self, main_window):
         self.main_window = main_window
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
-        self._hooks = {}  # window_title: hook_id
-        self._hook_callbacks = {}  # window_title: callback_function
+        self._target_windows = {}  # window_title: hwnd
 
     def _key_to_vk(self, key):
         # F tuşları için özel işlem
@@ -73,51 +53,26 @@ class WindowsAPI:
 
     def set_hook(self, window_title, pid):
         try:
+            # Sadece tuş gönderme kullanacağız, hook kullanmayacağız
             hwnd = win32gui.FindWindow(None, window_title)
             if hwnd:
-                # Hook callback fonksiyonu
-                def hook_callback(nCode, wParam, lParam):
-                    if nCode >= 0 and wParam == WM_KEYDOWN:
-                        return self.user32.CallNextHookEx(None, nCode, wParam, lParam)
-                    return self.user32.CallNextHookEx(None, nCode, wParam, lParam)
-                
-                # Callback'i sakla (garbage collection'dan korumak için)
-                callback = HOOKPROC(hook_callback)
-                self._hook_callbacks[window_title] = callback
-                
-                # Hook'u kur
-                hook_id = self.user32.SetWindowsHookExA(
-                    WH_KEYBOARD_LL,
-                    callback,
-                    None,
-                    0  # Global hook için 0
-                )
-                
-                if hook_id:
-                    self._hooks[window_title] = hook_id
-                    self.main_window.log(f"Hook kuruldu: {window_title} (PID: {pid})")
-                    return True
-                else:
-                    error = ctypes.WinError()
-                    self.main_window.log(f"Hook kurma hatası: {error}")
+                self._target_windows[window_title] = hwnd
+                self.main_window.log(f"Client hazır: {window_title} (PID: {pid})")
+                return True
             return False
         except Exception as e:
-            self.main_window.log(f"Hook kurma hatası: {e}")
+            self.main_window.log(f"Client hazırlama hatası: {e}")
             return False
 
     def remove_hook(self, window_title, pid):
         try:
-            hook_id = self._hooks.get(window_title)
-            if hook_id:
-                if self.user32.UnhookWindowsHookEx(hook_id):
-                    del self._hooks[window_title]
-                    if window_title in self._hook_callbacks:
-                        del self._hook_callbacks[window_title]
-                    self.main_window.log(f"Hook kaldırıldı: {window_title} (PID: {pid})")
-                    return True
+            if window_title in self._target_windows:
+                del self._target_windows[window_title]
+                self.main_window.log(f"Client durduruldu: {window_title} (PID: {pid})")
+                return True
             return False
         except Exception as e:
-            self.main_window.log(f"Hook kaldırma hatası: {e}")
+            self.main_window.log(f"Client durdurma hatası: {e}")
             return False
 
 class WowClient:
@@ -165,11 +120,11 @@ class WowClient:
     def start(self):
         if not self.running:
             try:
-                # Hook'u kur
+                # Client'ı hazırla
                 if self.windows_api.set_hook(self.window_title, self.pid):
                     self.hooked = True
                 else:
-                    raise Exception("Hook kurulamadı")
+                    raise Exception("Client hazırlanamadı")
                 
                 # Thread'i başlat
                 self.running = True
@@ -190,7 +145,7 @@ class WowClient:
                 self._stop_event.set()
                 self.running = False
                 
-                # Sonra hook'u kaldır
+                # Sonra client'ı durdur
                 if self.hooked:
                     self.windows_api.remove_hook(self.window_title, self.pid)
                     self.hooked = False
@@ -254,9 +209,8 @@ class ClientControl(QGroupBox):
         # Alt kısım - Butonlar
         button_layout = QHBoxLayout()
         self.start_button = QPushButton("Başlat")
-        self.remove_button = QPushButton("Kaldır")
-        
         self.start_button.clicked.connect(self.toggle_client)
+        self.remove_button = QPushButton("Kaldır")
         self.remove_button.clicked.connect(self.remove_client)
         
         button_layout.addWidget(self.start_button)
