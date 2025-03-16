@@ -8,6 +8,7 @@ import win32con
 import win32api
 import win32process
 import ctypes
+import traceback
 from ctypes import wintypes, CFUNCTYPE, POINTER
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QPushButton, QLabel, QSpinBox, 
@@ -56,21 +57,21 @@ class WindowsAPI:
         # Normal tuşlar için
         return ord(key.upper())
 
-    def send_key(self, window_title, key):
+    def send_key(self, window_title, key, pid):
         try:
             hwnd = win32gui.FindWindow(None, window_title)
             if hwnd:
                 vk_code = self._key_to_vk(key)
                 win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, vk_code, 0)
                 win32api.PostMessage(hwnd, win32con.WM_KEYUP, vk_code, 0)
-                self.main_window.log(f"Tuş gönderildi: {key} -> {window_title}")
+                self.main_window.log(f"Tuş gönderildi: {key} -> {window_title} (PID: {pid})")
                 return True
             return False
         except Exception as e:
             self.main_window.log(f"Tuş gönderme hatası: {e}")
             return False
 
-    def set_hook(self, window_title):
+    def set_hook(self, window_title, pid):
         try:
             hwnd = win32gui.FindWindow(None, window_title)
             if hwnd:
@@ -94,7 +95,7 @@ class WindowsAPI:
                 
                 if hook_id:
                     self._hooks[window_title] = hook_id
-                    self.main_window.log(f"Hook kuruldu: {window_title}")
+                    self.main_window.log(f"Hook kuruldu: {window_title} (PID: {pid})")
                     return True
                 else:
                     error = ctypes.WinError()
@@ -104,7 +105,7 @@ class WindowsAPI:
             self.main_window.log(f"Hook kurma hatası: {e}")
             return False
 
-    def remove_hook(self, window_title):
+    def remove_hook(self, window_title, pid):
         try:
             hook_id = self._hooks.get(window_title)
             if hook_id:
@@ -112,7 +113,7 @@ class WindowsAPI:
                     del self._hooks[window_title]
                     if window_title in self._hook_callbacks:
                         del self._hook_callbacks[window_title]
-                    self.main_window.log(f"Hook kaldırıldı: {window_title}")
+                    self.main_window.log(f"Hook kaldırıldı: {window_title} (PID: {pid})")
                     return True
             return False
         except Exception as e:
@@ -137,7 +138,7 @@ class WowClient:
     def send_key(self):
         try:
             if self.hooked:
-                self.windows_api.send_key(self.window_title, self.key)
+                self.windows_api.send_key(self.window_title, self.key, self.pid)
                 self.current_delay = 0
                 self.next_delay = random.uniform(self.min_delay, self.max_delay)
         except Exception as e:
@@ -145,23 +146,27 @@ class WowClient:
             self.stop()
 
     def advertise_loop(self):
-        while not self._stop_event.is_set():
-            try:
-                self.send_key()
-                # Her 0.1 saniyede bir kontrol et
-                for _ in range(int(self.next_delay * 10)):
-                    if self._stop_event.is_set():
-                        return
-                    time.sleep(0.1)
-            except Exception as e:
-                self.windows_api.main_window.log(f"Loop hatası: {e}")
-                break
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self.send_key()
+                    # Her 0.1 saniyede bir kontrol et
+                    for _ in range(int(self.next_delay * 10)):
+                        if self._stop_event.is_set():
+                            return
+                        time.sleep(0.1)
+                except Exception as e:
+                    self.windows_api.main_window.log(f"Loop hatası (PID: {self.pid}): {e}")
+                    break
+        except Exception as e:
+            self.windows_api.main_window.log(f"Thread hatası (PID: {self.pid}): {e}")
+            self.windows_api.main_window.log(traceback.format_exc())
 
     def start(self):
         if not self.running:
             try:
                 # Hook'u kur
-                if self.windows_api.set_hook(self.window_title):
+                if self.windows_api.set_hook(self.window_title, self.pid):
                     self.hooked = True
                 else:
                     raise Exception("Hook kurulamadı")
@@ -174,26 +179,32 @@ class WowClient:
                 self.thread.daemon = True
                 self.thread.start()
             except Exception as e:
-                self.windows_api.main_window.log(f"Client başlatma hatası: {e}")
+                self.windows_api.main_window.log(f"Client başlatma hatası (PID: {self.pid}): {e}")
                 self.hooked = False
                 self.running = False
 
     def stop(self):
         if self.running:
-            # Önce thread'i durdur
-            self._stop_event.set()
-            self.running = False
-            if self.thread and self.thread.is_alive():
-                try:
-                    self.thread.join(timeout=1.0)
-                except Exception as e:
-                    self.windows_api.main_window.log(f"Thread kapatma hatası: {e}")
-            self.thread = None
-            
-            # Sonra hook'u kaldır
-            if self.hooked:
-                self.windows_api.remove_hook(self.window_title)
-                self.hooked = False
+            try:
+                # Önce thread'i durdur
+                self._stop_event.set()
+                self.running = False
+                
+                # Sonra hook'u kaldır
+                if self.hooked:
+                    self.windows_api.remove_hook(self.window_title, self.pid)
+                    self.hooked = False
+                
+                # Thread'i bekle
+                if self.thread and self.thread.is_alive():
+                    try:
+                        self.thread.join(timeout=0.5)  # Daha kısa timeout
+                    except Exception as e:
+                        self.windows_api.main_window.log(f"Thread kapatma hatası (PID: {self.pid}): {e}")
+                self.thread = None
+            except Exception as e:
+                self.windows_api.main_window.log(f"Client durdurma hatası (PID: {self.pid}): {e}")
+                self.windows_api.main_window.log(traceback.format_exc())
 
 class ClientControl(QGroupBox):
     def __init__(self, client_info, windows_api, parent=None):
@@ -272,7 +283,7 @@ class ClientControl(QGroupBox):
             else:
                 self.stop_client()
         except Exception as e:
-            self.window().log(f"Client toggle hatası: {e}")
+            self.window().log(f"Client toggle hatası (PID: {self.client.pid}): {e}")
             self.stop_client()
 
     def stop_client(self):
@@ -282,7 +293,7 @@ class ClientControl(QGroupBox):
             self.timer.stop()
             self.progress.setValue(0)
         except Exception as e:
-            self.window().log(f"Client durdurma hatası: {e}")
+            self.window().log(f"Client durdurma hatası (PID: {self.client.pid}): {e}")
 
     def remove_client(self):
         try:
@@ -300,7 +311,7 @@ class ClientControl(QGroupBox):
                 self.deleteLater()
             
         except Exception as e:
-            self.window().log(f"Client kaldırma hatası: {e}")
+            self.window().log(f"Client kaldırma hatası (PID: {self.client.pid}): {e}")
 
 class ProcessSelector(QDialog):
     def __init__(self, parent=None):
@@ -332,33 +343,40 @@ class ProcessSelector(QDialog):
 
     def refresh_processes(self):
         self.process_list.clear()
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                # WoW veya benzer isimli processleri bul
-                if 'wow' in proc.info['name'].lower() or 'world' in proc.info['name'].lower():
-                    pid = proc.info['pid']
-                    hwnd = None
-                    
-                    def callback(h, extra):
-                        if win32process.GetWindowThreadProcessId(h)[1] == pid:
-                            if win32gui.IsWindowVisible(h):
-                                extra[0] = h
-                                return False
-                        return True
-                    
-                    extra = [None]
-                    win32gui.EnumWindows(callback, extra)
-                    hwnd = extra[0]
-                    
-                    if hwnd:
-                        title = win32gui.GetWindowText(hwnd)
-                        if title:  # Boş başlıklı pencereleri atla
-                            item_text = f"{title} (PID: {pid})"
-                            item = QListWidgetItem(item_text)
-                            item.setData(Qt.ItemDataRole.UserRole, (title, pid))
-                            self.process_list.addItem(item)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    # WoW veya benzer isimli processleri bul
+                    if 'wow' in proc.info['name'].lower() or 'world' in proc.info['name'].lower():
+                        pid = proc.info['pid']
+                        hwnd = None
+                        
+                        def callback(h, extra):
+                            try:
+                                if win32process.GetWindowThreadProcessId(h)[1] == pid:
+                                    if win32gui.IsWindowVisible(h):
+                                        extra[0] = h
+                                        return False
+                            except Exception:
+                                pass
+                            return True
+                        
+                        extra = [None]
+                        win32gui.EnumWindows(callback, extra)
+                        hwnd = extra[0]
+                        
+                        if hwnd:
+                            title = win32gui.GetWindowText(hwnd)
+                            if title:  # Boş başlıklı pencereleri atla
+                                item_text = f"{title} (PID: {pid})"
+                                item = QListWidgetItem(item_text)
+                                item.setData(Qt.ItemDataRole.UserRole, (title, pid))
+                                self.process_list.addItem(item)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, Exception) as e:
+                    continue
+        except Exception as e:
+            if self.parent():
+                self.parent().log(f"Process listesi hatası: {e}")
 
     def get_selected_processes(self):
         return [item.data(Qt.ItemDataRole.UserRole) 
@@ -420,10 +438,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
     def log(self, message):
-        self.log_text.append(f"{time.strftime('%H:%M:%S')} - {message}")
-        self.log_text.verticalScrollBar().setValue(
-            self.log_text.verticalScrollBar().maximum()
-        )
+        try:
+            self.log_text.append(f"{time.strftime('%H:%M:%S')} - {message}")
+            self.log_text.verticalScrollBar().setValue(
+                self.log_text.verticalScrollBar().maximum()
+            )
+        except Exception as e:
+            print(f"Log hatası: {e}")
 
     def add_client(self):
         try:
@@ -442,6 +463,7 @@ class MainWindow(QMainWindow):
                     self.log(f"Client eklendi: {process[0]} (PID: {process[1]})")
         except Exception as e:
             self.log(f"Client ekleme hatası: {e}")
+            self.log(traceback.format_exc())
 
     def remove_client_control(self, control):
         try:
@@ -452,7 +474,7 @@ class MainWindow(QMainWindow):
             # Listeden kaldır
             if control in self.client_controls:
                 self.client_controls.remove(control)
-                self.log(f"Client kaldırıldı: {control.client.window_title}")
+                self.log(f"Client kaldırıldı: {control.client.window_title} (PID: {control.client.pid})")
             
             # Kalan kontrolleri yeniden düzenle
             for i, ctrl in enumerate(self.client_controls):
@@ -462,6 +484,7 @@ class MainWindow(QMainWindow):
             
         except Exception as e:
             self.log(f"Client kaldırma hatası: {e}")
+            self.log(traceback.format_exc())
 
     def stop_all_clients(self):
         for control in self.client_controls[:]:
