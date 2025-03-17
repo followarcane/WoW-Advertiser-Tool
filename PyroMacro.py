@@ -61,15 +61,25 @@ class WindowsAPI:
             if hwnd:
                 vk_code = self._key_to_vk(key)
                 
-                # WM_CHAR kullanarak doğrudan karakteri gönderelim
-                # Bu aktif pencere olmasa bile çalışır
-                if len(key) == 1:  # Tek karakter tuşlar için
-                    result = win32api.SendMessage(hwnd, win32con.WM_CHAR, ord(key), 0)
-                else:  # F tuşları gibi özel tuşlar için
-                    result = win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, vk_code, 0)
-                    result2 = win32api.SendMessage(hwnd, win32con.WM_KEYUP, vk_code, 0)
+                # Pencere thread'ini bul
+                target_thread_id = win32process.GetWindowThreadProcessId(hwnd)[0]
                 
-                log_msg = f"Tuş gönderildi: {key} -> {window_title} (PID: {pid})"
+                # Tuşu gönder (PostThreadMessage kullanarak)
+                result = self.user32.PostThreadMessageW(
+                    target_thread_id, 
+                    win32con.WM_KEYDOWN, 
+                    vk_code, 
+                    0
+                )
+                time.sleep(0.05)
+                result2 = self.user32.PostThreadMessageW(
+                    target_thread_id, 
+                    win32con.WM_KEYUP, 
+                    vk_code, 
+                    0
+                )
+                
+                log_msg = f"Tuş gönderildi: {key} -> {window_title} (PID: {pid}, ThreadID: {target_thread_id}) - Sonuç: {result},{result2}"
                 self.main_window.log(log_msg)
                 write_log(log_msg)
                 return True
@@ -182,7 +192,6 @@ class WowClient:
                 self.thread = threading.Thread(target=self.advertise_loop)
                 self.thread.daemon = True
                 self.thread.start()
-                write_log(f"Client başlatıldı: {self.window_title} (PID: {self.pid})")
             except Exception as e:
                 error_msg = f"Client başlatma hatası (PID: {self.pid}): {e}"
                 self.windows_api.main_window.log(error_msg)
@@ -194,54 +203,43 @@ class WowClient:
     def stop(self):
         if self.running:
             try:
-                # Önce thread'i durdur
+                # Thread'i durdur
                 self._stop_event.set()
-                self.running = False
-                write_log(f"Client durdurma başlatıldı: {self.window_title} (PID: {self.pid})")
+                if self.thread and self.thread.is_alive():
+                    self.thread.join(0.5)  # 0.5 saniye bekle
                 
-                # Sonra client'ı durdur
+                # Hook'u kaldır
                 if self.hooked:
                     self.windows_api.remove_hook(self.window_title, self.pid)
                     self.hooked = False
                 
-                # Thread'i bekle
-                if self.thread and self.thread.is_alive():
-                    try:
-                        self.thread.join(timeout=0.5)  # Daha kısa timeout
-                    except Exception as e:
-                        error_msg = f"Thread kapatma hatası (PID: {self.pid}): {e}"
-                        self.windows_api.main_window.log(error_msg)
-                        write_log(error_msg)
-                        write_log(traceback.format_exc())
-                self.thread = None
-                write_log(f"Client durduruldu: {self.window_title} (PID: {self.pid})")
+                self.running = False
             except Exception as e:
                 error_msg = f"Client durdurma hatası (PID: {self.pid}): {e}"
                 self.windows_api.main_window.log(error_msg)
                 write_log(error_msg)
                 write_log(traceback.format_exc())
+                self.running = False
 
 class ClientControl(QGroupBox):
-    def __init__(self, client_info, windows_api, parent=None):
+    def __init__(self, process_info, windows_api, parent=None):
         super().__init__(parent)
-        self.client = WowClient(client_info[0], client_info[1], windows_api)
-        self.setup_ui()
-        self.setFixedSize(400, 220)
-        self.timer = QTimer()
+        self.client = WowClient(process_info[0], process_info[1], windows_api)
+        self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_progress)
-        write_log(f"ClientControl oluşturuldu: {client_info[0]} (PID: {client_info[1]})")
+        self.setup_ui()
 
     def setup_ui(self):
         self.setTitle(f"Client: {self.client.window_title} (PID: {self.client.pid})")
         layout = QVBoxLayout()
         layout.setSpacing(5)
 
-        # Üst kısım - Tuş ayarı
+        # Tuş ayarı
         key_layout = QHBoxLayout()
         key_layout.addWidget(QLabel("Tuş:"))
         self.key_input = QLineEdit(self.client.key)
         self.key_input.setMaxLength(3)  # F10 gibi tuşlar için 3 karakter
-        self.key_input.setFixedWidth(50)  # Biraz daha geniş
+        self.key_input.setFixedWidth(50)
         key_layout.addWidget(self.key_input)
         key_layout.addStretch()
         layout.addLayout(key_layout)
@@ -295,7 +293,6 @@ class ClientControl(QGroupBox):
                 self.client.start()
                 self.start_button.setText("Durdur")
                 self.timer.start(100)
-                write_log(f"Client başlatıldı (UI): {self.client.window_title} (PID: {self.client.pid})")
             else:
                 self.stop_client()
         except Exception as e:
@@ -311,7 +308,6 @@ class ClientControl(QGroupBox):
             self.start_button.setText("Başlat")
             self.timer.stop()
             self.progress.setValue(0)
-            write_log(f"Client durduruldu (UI): {self.client.window_title} (PID: {self.client.pid})")
         except Exception as e:
             error_msg = f"Client durdurma hatası (PID: {self.client.pid}): {e}"
             self.window().log(error_msg)
@@ -332,7 +328,6 @@ class ClientControl(QGroupBox):
             if isinstance(main_window, MainWindow):
                 main_window.remove_client_control(self)
                 self.deleteLater()
-                write_log(f"Client kaldırıldı (UI): {self.client.window_title} (PID: {self.client.pid})")
             
         except Exception as e:
             error_msg = f"Client kaldırma hatası (PID: {self.client.pid}): {e}"
@@ -343,65 +338,60 @@ class ClientControl(QGroupBox):
 class ProcessSelector(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("WoW Client Seç")
-        self.setModal(True)
+        self.setWindowTitle("WoW Process Seçici")
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(400)
         self.setup_ui()
-        self.refresh_processes()
-        self.resize(400, 500)
-        write_log("ProcessSelector açıldı")
+        self.populate_process_list()
 
     def setup_ui(self):
         layout = QVBoxLayout()
         
+        # Process listesi
         self.process_list = QListWidget()
-        self.process_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        layout.addWidget(QLabel("WoW Client'ları seçin (Ctrl ile çoklu seçim yapabilirsiniz):"))
+        self.process_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         layout.addWidget(self.process_list)
-
-        button_layout = QHBoxLayout()
-        refresh_btn = QPushButton("Yenile")
-        select_btn = QPushButton("Ekle")
-        refresh_btn.clicked.connect(self.refresh_processes)
-        select_btn.clicked.connect(self.accept)
-        button_layout.addWidget(refresh_btn)
-        button_layout.addWidget(select_btn)
         
+        # Butonlar
+        button_layout = QHBoxLayout()
+        select_button = QPushButton("Seç")
+        select_button.clicked.connect(self.accept)
+        cancel_button = QPushButton("İptal")
+        cancel_button.clicked.connect(self.reject)
+        
+        button_layout.addWidget(select_button)
+        button_layout.addWidget(cancel_button)
         layout.addLayout(button_layout)
+        
         self.setLayout(layout)
 
-    def refresh_processes(self):
-        self.process_list.clear()
+    def populate_process_list(self):
         try:
-            write_log("Process listesi yenileniyor")
+            self.process_list.clear()
             for proc in psutil.process_iter(['pid', 'name']):
                 try:
-                    # WoW veya benzer isimli processleri bul
-                    if 'wow' in proc.info['name'].lower() or 'world' in proc.info['name'].lower():
+                    # WoW process'lerini bul
+                    if 'wow' in proc.info['name'].lower() or 'world of warcraft' in proc.info['name'].lower():
                         pid = proc.info['pid']
-                        hwnd = None
                         
-                        def callback(h, extra):
-                            try:
-                                if win32process.GetWindowThreadProcessId(h)[1] == pid:
-                                    if win32gui.IsWindowVisible(h):
-                                        extra[0] = h
-                                        return False
-                            except Exception:
-                                pass
+                        # Process'in pencere başlığını bul
+                        def callback(hwnd, hwnds):
+                            if win32gui.IsWindowVisible(hwnd) and win32gui.IsWindowEnabled(hwnd):
+                                _, found_pid = win32process.GetWindowThreadProcessId(hwnd)
+                                if found_pid == pid:
+                                    title = win32gui.GetWindowText(hwnd)
+                                    if title:  # Boş başlıkları atla
+                                        hwnds.append((title, pid))
                             return True
                         
-                        extra = [None]
-                        win32gui.EnumWindows(callback, extra)
-                        hwnd = extra[0]
+                        hwnds = []
+                        win32gui.EnumWindows(callback, hwnds)
                         
-                        if hwnd:
-                            title = win32gui.GetWindowText(hwnd)
-                            if title:  # Boş başlıklı pencereleri atla
-                                item_text = f"{title} (PID: {pid})"
-                                item = QListWidgetItem(item_text)
-                                item.setData(Qt.ItemDataRole.UserRole, (title, pid))
-                                self.process_list.addItem(item)
-                                write_log(f"Process bulundu: {title} (PID: {pid})")
+                        for title, pid in hwnds:
+                            item = QListWidgetItem(f"{title} (PID: {pid})")
+                            item.setData(Qt.ItemDataRole.UserRole, (title, pid))
+                            self.process_list.addItem(item)
+                            write_log(f"Process bulundu: {title} (PID: {pid})")
                 except (psutil.NoSuchProcess, psutil.AccessDenied, Exception) as e:
                     write_log(f"Process erişim hatası: {e}")
                     continue
