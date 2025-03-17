@@ -40,23 +40,3 @@ jobs:
       with:
         name: Pyro-RVN-Tool
         path: dist/Pyro-RVN-Tool.zip
-        
-    - name: Create Release
-      if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v1
-      with:
-        files: dist/Pyro-RVN-Tool.zip
-        name: Pyro RVN Tool ${{ github.ref_name }}
-        body: |
-          # Pyro RVN Tool ${{ github.ref_name }}
-
-          Basit ve hafif World of Warcraft reklam otomasyon aracı.
-          Simple and lightweight World of Warcraft advertisement automation tool.
-
-          ## Özellikler / Features
-          - Çoklu client desteği / Multiple client support
-          - Özelleştirilebilir tuş atamaları / Customizable key bindings
-          - Ayarlanabilir mesaj gecikmesi (30-3600 saniye) / Adjustable message delay (30-3600 seconds)
-          - Gerçek zamanlı ilerleme takibi / Real-time progress tracking
-          - Otomatik process algılama / Automatic process detection
-          - Minimal ve temiz arayüz / Minimal and clean UI
