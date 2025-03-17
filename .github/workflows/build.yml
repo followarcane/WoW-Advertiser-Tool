@@ -29,23 +29,26 @@ jobs:
         
     - name: Build with PyInstaller
       run: |
-        pyinstaller --onefile --windowed --name="WoW Advertiser" --clean --noupx --disable-windowed-traceback --hidden-import win32api --hidden-import win32con --hidden-import win32gui --hidden-import win32process PyroMacro.py
+        pyinstaller --onefile --windowed --name="Pyro RVN Tool" --clean --noupx --disable-windowed-traceback --hidden-import win32api --hidden-import win32con --hidden-import win32gui --hidden-import win32process PyroMacro.py
+        
+    - name: Zip the executable
+      run: |
+        Compress-Archive -Path "dist/Pyro RVN Tool.exe" -DestinationPath "dist/Pyro-RVN-Tool.zip"
         
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: WoW-Advertiser
-        path: dist/WoW Advertiser.exe
+        name: Pyro-RVN-Tool
+        path: dist/Pyro-RVN-Tool.zip
         
     - name: Create Release
-      id: create_release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
-        files: dist/WoW Advertiser.exe
-        name: WoW Advertiser ${{ github.ref_name }}
+        files: dist/Pyro-RVN-Tool.zip
+        name: Pyro RVN Tool ${{ github.ref_name }}
         body: |
-          # WoW Advertiser ${{ github.ref_name }}
+          # Pyro RVN Tool ${{ github.ref_name }}
 
           Basit ve hafif World of Warcraft reklam otomasyon aracı.
           Simple and lightweight World of Warcraft advertisement automation tool.
@@ -57,11 +60,3 @@ jobs:
           - Gerçek zamanlı ilerleme takibi / Real-time progress tracking
           - Otomatik process algılama / Automatic process detection
           - Minimal ve temiz arayüz / Minimal and clean UI
-
-          ## Kullanım / Usage
-          1. Uygulamayı başlatın / Start the application
-          2. "Client Ekle" ile WoW pencerelerini seçin / Select WoW windows with "Client Ekle"
-          3. Her client için ayarları yapın / Configure settings for each client
-          4. "Başlat" ile otomasyonu başlatın / Click "Başlat" to start automation
-        draft: false
-        prerelease: false
