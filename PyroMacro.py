@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                            QHBoxLayout, QPushButton, QLabel, QSpinBox, 
                            QLineEdit, QGroupBox, QGridLayout, QDialog, 
                            QListWidget, QListWidgetItem, QMessageBox, QScrollArea,
-                           QProgressBar, QTextEdit)
+                           QProgressBar, QTextEdit, QComboBox)
 from PyQt6.QtCore import Qt, QTimer
 
 class WindowsAPI:
@@ -24,36 +24,42 @@ class WindowsAPI:
         self.kernel32 = ctypes.windll.kernel32
         self._target_windows = {}  # window_title: hwnd
 
-    def _key_to_vk(self, key):
-        # F tuşları için özel işlem
-        if key.upper().startswith('F') and len(key) <= 3:
-            try:
-                f_num = int(key[1:])
-                if 1 <= f_num <= 24:  # F1-F24
-                    return win32con.VK_F1 + f_num - 1
-            except ValueError:
-                pass
-        
-        # Normal tuşlar için
-        return ord(key.upper())
-
-    def send_key(self, window_title, key, pid):
+    def send_message_to_wow(self, window_title, message, pid):
         try:
             hwnd = win32gui.FindWindow(None, window_title)
             if hwnd:
-                vk_code = self._key_to_vk(key)
-                win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, vk_code, 0)
-                win32api.PostMessage(hwnd, win32con.WM_KEYUP, vk_code, 0)
-                self.main_window.log(f"Tuş gönderildi: {key} -> {window_title} (PID: {pid})")
+                # Mesajı karakterlere bölelim
+                for char in message:
+                    # Her karakteri WM_CHAR mesajı ile gönderelim
+                    win32api.PostMessage(hwnd, win32con.WM_CHAR, ord(char), 0)
+                
+                # Enter tuşu ile gönderelim
+                win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, win32con.VK_RETURN, 0)
+                win32api.PostMessage(hwnd, win32con.WM_KEYUP, win32con.VK_RETURN, 0)
+                
+                self.main_window.log(f"Mesaj gönderildi: {message} -> {window_title} (PID: {pid})")
                 return True
             return False
         except Exception as e:
-            self.main_window.log(f"Tuş gönderme hatası: {e}")
+            self.main_window.log(f"Mesaj gönderme hatası: {e}")
+            return False
+
+    def open_chat(self, window_title, pid):
+        try:
+            hwnd = win32gui.FindWindow(None, window_title)
+            if hwnd:
+                # / tuşu ile chat açalım
+                win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, ord('/'), 0)
+                win32api.PostMessage(hwnd, win32con.WM_KEYUP, ord('/'), 0)
+                time.sleep(0.1)  # Chat açılması için kısa bir bekleme
+                return True
+            return False
+        except Exception as e:
+            self.main_window.log(f"Chat açma hatası: {e}")
             return False
 
     def set_hook(self, window_title, pid):
         try:
-            # Sadece tuş gönderme kullanacağız, hook kullanmayacağız
             hwnd = win32gui.FindWindow(None, window_title)
             if hwnd:
                 self._target_windows[window_title] = hwnd
@@ -79,7 +85,7 @@ class WowClient:
     def __init__(self, window_title, pid, windows_api):
         self.window_title = window_title
         self.pid = pid
-        self.key = '1'
+        self.message = "/2 WTS Boost Services - Mythic+ 15-20 Keys - Raid Boost - PvP Boost - Leveling 1-70 - Fast & Safe - Whisper me for more info!"
         self.min_delay = 30
         self.max_delay = 60
         self.running = False
@@ -90,21 +96,25 @@ class WowClient:
         self._stop_event = threading.Event()
         self.hooked = False
 
-    def send_key(self):
+    def send_message(self):
         try:
             if self.hooked:
-                self.windows_api.send_key(self.window_title, self.key, self.pid)
-                self.current_delay = 0
-                self.next_delay = random.uniform(self.min_delay, self.max_delay)
+                # Önce chat'i açalım
+                if self.windows_api.open_chat(self.window_title, self.pid):
+                    time.sleep(0.1)  # Chat açılması için kısa bir bekleme
+                    # Sonra mesajı gönderelim
+                    self.windows_api.send_message_to_wow(self.window_title, self.message, self.pid)
+                    self.current_delay = 0
+                    self.next_delay = random.uniform(self.min_delay, self.max_delay)
         except Exception as e:
-            self.windows_api.main_window.log(f"Tuş gönderme hatası: {e}")
+            self.windows_api.main_window.log(f"Mesaj gönderme hatası: {e}")
             self.stop()
 
     def advertise_loop(self):
         try:
             while not self._stop_event.is_set():
                 try:
-                    self.send_key()
+                    self.send_message()
                     # Her 0.1 saniyede bir kontrol et
                     for _ in range(int(self.next_delay * 10)):
                         if self._stop_event.is_set():
@@ -166,7 +176,7 @@ class ClientControl(QGroupBox):
         super().__init__(parent)
         self.client = WowClient(client_info[0], client_info[1], windows_api)
         self.setup_ui()
-        self.setFixedSize(400, 220)
+        self.setFixedSize(400, 250)  # Biraz daha yüksek
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_progress)
 
@@ -175,15 +185,21 @@ class ClientControl(QGroupBox):
         layout = QVBoxLayout()
         layout.setSpacing(5)
 
-        # Üst kısım - Tuş ayarı
-        key_layout = QHBoxLayout()
-        key_layout.addWidget(QLabel("Tuş:"))
-        self.key_input = QLineEdit(self.client.key)
-        self.key_input.setMaxLength(3)  # F10 gibi tuşlar için 3 karakter
-        self.key_input.setFixedWidth(50)  # Biraz daha geniş
-        key_layout.addWidget(self.key_input)
-        key_layout.addStretch()
-        layout.addLayout(key_layout)
+        # Mesaj ayarı
+        message_layout = QVBoxLayout()
+        message_layout.addWidget(QLabel("Mesaj:"))
+        self.message_input = QLineEdit(self.client.message)
+        message_layout.addWidget(self.message_input)
+        layout.addLayout(message_layout)
+
+        # Kanal seçimi
+        channel_layout = QHBoxLayout()
+        channel_layout.addWidget(QLabel("Kanal:"))
+        self.channel_combo = QComboBox()
+        self.channel_combo.addItems(["/2 Trade", "/4 LFG", "/1 General", "/3 LocalDefense", "Custom"])
+        self.channel_combo.currentIndexChanged.connect(self.update_message_prefix)
+        channel_layout.addWidget(self.channel_combo)
+        layout.addLayout(channel_layout)
 
         # Orta kısım - Gecikme ayarları
         delay_layout = QGridLayout()
@@ -219,6 +235,27 @@ class ClientControl(QGroupBox):
 
         self.setLayout(layout)
 
+    def update_message_prefix(self, index):
+        current_text = self.message_input.text()
+        # Mevcut kanal önekini kaldır
+        if current_text.startswith("/"):
+            parts = current_text.split(" ", 2)
+            if len(parts) >= 3:
+                current_text = parts[2]
+        
+        # Yeni kanal önekini ekle
+        prefix = ""
+        if index == 0:
+            prefix = "/2 "
+        elif index == 1:
+            prefix = "/4 "
+        elif index == 2:
+            prefix = "/1 "
+        elif index == 3:
+            prefix = "/3 "
+        
+        self.message_input.setText(prefix + current_text)
+
     def update_progress(self):
         if self.client.running and self.client.next_delay > 0:
             self.client.current_delay += 0.1
@@ -228,7 +265,7 @@ class ClientControl(QGroupBox):
     def toggle_client(self):
         try:
             if not self.client.running:
-                self.client.key = self.key_input.text()
+                self.client.message = self.message_input.text()
                 self.client.min_delay = self.min_delay.value()
                 self.client.max_delay = self.max_delay.value()
                 self.client.start()
@@ -266,208 +303,3 @@ class ClientControl(QGroupBox):
             
         except Exception as e:
             self.window().log(f"Client kaldırma hatası (PID: {self.client.pid}): {e}")
-
-class ProcessSelector(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("WoW Client Seç")
-        self.setModal(True)
-        self.setup_ui()
-        self.refresh_processes()
-        self.resize(400, 500)
-
-    def setup_ui(self):
-        layout = QVBoxLayout()
-        
-        self.process_list = QListWidget()
-        self.process_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        layout.addWidget(QLabel("WoW Client'ları seçin (Ctrl ile çoklu seçim yapabilirsiniz):"))
-        layout.addWidget(self.process_list)
-
-        button_layout = QHBoxLayout()
-        refresh_btn = QPushButton("Yenile")
-        select_btn = QPushButton("Ekle")
-        refresh_btn.clicked.connect(self.refresh_processes)
-        select_btn.clicked.connect(self.accept)
-        button_layout.addWidget(refresh_btn)
-        button_layout.addWidget(select_btn)
-        
-        layout.addLayout(button_layout)
-        self.setLayout(layout)
-
-    def refresh_processes(self):
-        self.process_list.clear()
-        try:
-            for proc in psutil.process_iter(['pid', 'name']):
-                try:
-                    # WoW veya benzer isimli processleri bul
-                    if 'wow' in proc.info['name'].lower() or 'world' in proc.info['name'].lower():
-                        pid = proc.info['pid']
-                        hwnd = None
-                        
-                        def callback(h, extra):
-                            try:
-                                if win32process.GetWindowThreadProcessId(h)[1] == pid:
-                                    if win32gui.IsWindowVisible(h):
-                                        extra[0] = h
-                                        return False
-                            except Exception:
-                                pass
-                            return True
-                        
-                        extra = [None]
-                        win32gui.EnumWindows(callback, extra)
-                        hwnd = extra[0]
-                        
-                        if hwnd:
-                            title = win32gui.GetWindowText(hwnd)
-                            if title:  # Boş başlıklı pencereleri atla
-                                item_text = f"{title} (PID: {pid})"
-                                item = QListWidgetItem(item_text)
-                                item.setData(Qt.ItemDataRole.UserRole, (title, pid))
-                                self.process_list.addItem(item)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, Exception) as e:
-                    continue
-        except Exception as e:
-            if self.parent():
-                self.parent().log(f"Process listesi hatası: {e}")
-
-    def get_selected_processes(self):
-        return [item.data(Qt.ItemDataRole.UserRole) 
-                for item in self.process_list.selectedItems()]
-
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("WoW Advertiser")
-        self.client_controls = []
-        self.windows_api = WindowsAPI(self)
-        self.setup_ui()
-        self.setFixedSize(1280, 900)
-
-    def setup_ui(self):
-        central_widget = QWidget()
-        main_layout = QVBoxLayout()
-
-        # Client ekleme butonu
-        header_layout = QHBoxLayout()
-        add_client_btn = QPushButton("Client Ekle")
-        add_client_btn.clicked.connect(self.add_client)
-        header_layout.addWidget(add_client_btn)
-        header_layout.addStretch()
-        main_layout.addLayout(header_layout)
-
-        # Scroll area ve grid layout için container
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        
-        self.grid_widget = QWidget()
-        self.grid_layout = QGridLayout(self.grid_widget)
-        self.grid_layout.setSpacing(10)
-        
-        scroll.setWidget(self.grid_widget)
-        main_layout.addWidget(scroll)
-
-        # Minimal Log box
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setFixedHeight(100)
-        self.log_text.setStyleSheet("""
-            QTextEdit {
-                border: 1px solid #999;
-                border-radius: 4px;
-                padding: 5px;
-                font-family: monospace;
-                font-size: 11px;
-            }
-        """)
-        main_layout.addWidget(self.log_text)
-        
-        # Log box'ı alta yapıştır
-        main_layout.setStretchFactor(scroll, 1)
-        main_layout.setStretchFactor(self.log_text, 0)
-
-        central_widget.setLayout(main_layout)
-        self.setCentralWidget(central_widget)
-
-    def log(self, message):
-        try:
-            self.log_text.append(f"{time.strftime('%H:%M:%S')} - {message}")
-            self.log_text.verticalScrollBar().setValue(
-                self.log_text.verticalScrollBar().maximum()
-            )
-        except Exception as e:
-            print(f"Log hatası: {e}")
-
-    def add_client(self):
-        try:
-            dialog = ProcessSelector(self)
-            if dialog.exec():
-                selected_processes = dialog.get_selected_processes()
-                for process in selected_processes:
-                    control = ClientControl(process, self.windows_api, self)
-                    self.client_controls.append(control)
-                    
-                    # Grid'e yerleştirme (soldan sağa, yukarıdan aşağı)
-                    idx = len(self.client_controls) - 1
-                    row = idx // 3
-                    col = idx % 3
-                    self.grid_layout.addWidget(control, row, col)
-                    self.log(f"Client eklendi: {process[0]} (PID: {process[1]})")
-        except Exception as e:
-            self.log(f"Client ekleme hatası: {e}")
-            self.log(traceback.format_exc())
-
-    def remove_client_control(self, control):
-        try:
-            # Grid'den kaldır
-            self.grid_layout.removeWidget(control)
-            control.hide()  # Hemen gizle
-            
-            # Listeden kaldır
-            if control in self.client_controls:
-                self.client_controls.remove(control)
-                self.log(f"Client kaldırıldı: {control.client.window_title} (PID: {control.client.pid})")
-            
-            # Kalan kontrolleri yeniden düzenle
-            for i, ctrl in enumerate(self.client_controls):
-                row = i // 3
-                col = i % 3
-                self.grid_layout.addWidget(ctrl, row, col)
-            
-        except Exception as e:
-            self.log(f"Client kaldırma hatası: {e}")
-            self.log(traceback.format_exc())
-
-    def stop_all_clients(self):
-        for control in self.client_controls[:]:
-            try:
-                control.stop_client()
-            except Exception as e:
-                self.log(f"Client durdurma hatası: {e}")
-
-    def closeEvent(self, event):
-        try:
-            self.stop_all_clients()
-            self.log("Uygulama kapatılıyor...")
-            event.accept()
-        except Exception as e:
-            self.log(f"Uygulama kapatma hatası: {e}")
-            event.accept()
-
-def main():
-    app = QApplication(sys.argv)
-    app.setStyle("Fusion")
-    
-    try:
-        window = MainWindow()
-        window.show()
-        window.log("Uygulama başlatıldı")
-        sys.exit(app.exec())
-    except Exception as e:
-        print(f"Uygulama hatası: {e}")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
