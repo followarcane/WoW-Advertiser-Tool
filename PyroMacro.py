@@ -34,58 +34,11 @@ def write_log(message):
 # Başlangıç logunu yaz
 write_log("=== Uygulama başlatılıyor ===")
 
-# Düşük seviyeli klavye girişi için
-user32 = ctypes.WinDLL('user32', use_last_error=True)
-kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-
-# Sabitler
-KEYEVENTF_EXTENDEDKEY = 0x0001
-KEYEVENTF_KEYUP = 0x0002
-KEYEVENTF_SCANCODE = 0x0008
-KEYEVENTF_UNICODE = 0x0004
-INPUT_KEYBOARD = 1
-MAPVK_VK_TO_VSC = 0
-
-# Yapılar
-class MOUSEINPUT(ctypes.Structure):
-    _fields_ = (("dx", wintypes.LONG),
-                ("dy", wintypes.LONG),
-                ("mouseData", wintypes.DWORD),
-                ("dwFlags", wintypes.DWORD),
-                ("time", wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)))
-
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = (("wVk", wintypes.WORD),
-                ("wScan", wintypes.WORD),
-                ("dwFlags", wintypes.DWORD),
-                ("time", wintypes.DWORD),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)))
-
-class HARDWAREINPUT(ctypes.Structure):
-    _fields_ = (("uMsg", wintypes.DWORD),
-                ("wParamL", wintypes.WORD),
-                ("wParamH", wintypes.WORD))
-
-class INPUT(ctypes.Structure):
-    class _INPUT(ctypes.Union):
-        _fields_ = (("ki", KEYBDINPUT),
-                    ("mi", MOUSEINPUT),
-                    ("hi", HARDWAREINPUT))
-    _anonymous_ = ("_input",)
-    _fields_ = (("type", wintypes.DWORD),
-                ("_input", _INPUT))
-
-# Fonksiyon prototipleri
-user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
-user32.SendInput.restype = wintypes.UINT
-user32.GetMessageExtraInfo.restype = wintypes.LPARAM
-user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
-user32.MapVirtualKeyW.restype = wintypes.UINT
-
 class WindowsAPI:
     def __init__(self, main_window):
         self.main_window = main_window
+        self.user32 = ctypes.windll.user32
+        self.kernel32 = ctypes.windll.kernel32
         self._target_windows = {}  # window_title: hwnd
         write_log("WindowsAPI başlatıldı")
 
@@ -102,55 +55,18 @@ class WindowsAPI:
         # Normal tuşlar için
         return ord(key.upper())
 
-    def _send_key_input(self, vk_code, scan_code=0, flags=0):
-        """Düşük seviyeli tuş gönderme"""
-        if not scan_code:
-            scan_code = user32.MapVirtualKeyW(vk_code, MAPVK_VK_TO_VSC)
-        
-        # Extra info için pointer oluştur
-        extra = ctypes.c_ulong(0)
-        p_extra = ctypes.pointer(extra)
-        
-        # Tuşa basma
-        i = INPUT(type=INPUT_KEYBOARD, 
-                  ki=KEYBDINPUT(wVk=vk_code, 
-                                wScan=scan_code, 
-                                dwFlags=flags, 
-                                time=0, 
-                                dwExtraInfo=p_extra))
-        user32.SendInput(1, ctypes.byref(i), ctypes.sizeof(i))
-        
-        # Tuşu bırakma
-        i = INPUT(type=INPUT_KEYBOARD, 
-                  ki=KEYBDINPUT(wVk=vk_code, 
-                                wScan=scan_code, 
-                                dwFlags=flags | KEYEVENTF_KEYUP, 
-                                time=0, 
-                                dwExtraInfo=p_extra))
-        user32.SendInput(1, ctypes.byref(i), ctypes.sizeof(i))
-
     def send_key(self, window_title, key, pid):
         try:
             hwnd = win32gui.FindWindow(None, window_title)
             if hwnd:
                 vk_code = self._key_to_vk(key)
                 
-                # Mevcut aktif pencereyi kaydedelim
-                current_hwnd = user32.GetForegroundWindow()
-                
-                # Hedef pencereyi aktif yapalım
-                user32.SetForegroundWindow(hwnd)
-                
-                # Kısa bir bekleme
+                # WM_KEYDOWN ve WM_KEYUP mesajlarını gönder
+                result = win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, vk_code, 0)
                 time.sleep(0.05)
+                result2 = win32api.SendMessage(hwnd, win32con.WM_KEYUP, vk_code, 0)
                 
-                # Tuşu gönder
-                self._send_key_input(vk_code)
-                
-                # Önceki pencereyi geri aktif yapalım
-                user32.SetForegroundWindow(current_hwnd)
-                
-                log_msg = f"Tuş gönderildi: {key} -> {window_title} (PID: {pid})"
+                log_msg = f"Tuş gönderildi: {key} -> {window_title} (PID: {pid}) - Sonuç: {result},{result2}"
                 self.main_window.log(log_msg)
                 write_log(log_msg)
                 return True
@@ -205,105 +121,54 @@ class WowClient:
         self.running = False
         self.thread = None
         self.windows_api = windows_api
-        self.current_delay = 0
-        self.next_delay = 0
-        self._stop_event = threading.Event()
-        self.hooked = False
+        self.next_send_time = 0
         write_log(f"WowClient oluşturuldu: {window_title} (PID: {pid})")
 
-    def send_key(self):
-        try:
-            if self.hooked:
-                self.windows_api.send_key(self.window_title, self.key, self.pid)
-                self.current_delay = 0
-                self.next_delay = random.uniform(self.min_delay, self.max_delay)
-        except Exception as e:
-            error_msg = f"Tuş gönderme hatası: {e}"
-            self.windows_api.main_window.log(error_msg)
-            write_log(error_msg)
-            write_log(traceback.format_exc())
-            self.stop()
-
-    def advertise_loop(self):
-        try:
-            write_log(f"Advertise loop başlatıldı: {self.window_title} (PID: {self.pid})")
-            while not self._stop_event.is_set():
-                try:
-                    self.send_key()
-                    # Her 0.1 saniyede bir kontrol et
-                    for _ in range(int(self.next_delay * 10)):
-                        if self._stop_event.is_set():
-                            return
-                        time.sleep(0.1)
-                except Exception as e:
-                    error_msg = f"Loop hatası (PID: {self.pid}): {e}"
-                    self.windows_api.main_window.log(error_msg)
-                    write_log(error_msg)
-                    write_log(traceback.format_exc())
-                    self.stop()
-                    return
-        except Exception as e:
-            error_msg = f"Thread hatası (PID: {self.pid}): {e}"
-            self.windows_api.main_window.log(error_msg)
-            write_log(error_msg)
-            write_log(traceback.format_exc())
-            self.stop()
-
     def start(self):
-        try:
-            if not self.running:
-                self.hooked = self.windows_api.set_hook(self.window_title, self.pid)
-                if self.hooked:
-                    self._stop_event.clear()
-                    self.thread = threading.Thread(target=self.advertise_loop)
-                    self.thread.daemon = True
-                    self.thread.start()
-                    self.running = True
-                    log_msg = f"Client başlatıldı: {self.window_title} (PID: {self.pid})"
-                    self.windows_api.main_window.log(log_msg)
-                    write_log(log_msg)
-                    return True
-                else:
-                    error_msg = f"Client başlatılamadı: {self.window_title} (PID: {self.pid})"
-                    self.windows_api.main_window.log(error_msg)
-                    write_log(error_msg)
-                    return False
-            return False
-        except Exception as e:
-            error_msg = f"Client başlatma hatası: {e}"
-            self.windows_api.main_window.log(error_msg)
-            write_log(error_msg)
-            write_log(traceback.format_exc())
-            return False
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self._run)
+            self.thread.daemon = True
+            self.thread.start()
+            self.next_send_time = time.time() + random.randint(self.min_delay, self.max_delay)
+            write_log(f"Client başlatıldı: {self.window_title} (PID: {self.pid})")
+            return True
+        return False
 
     def stop(self):
+        if self.running:
+            self.running = False
+            if self.thread:
+                self.thread.join(1)
+            write_log(f"Client durduruldu: {self.window_title} (PID: {self.pid})")
+            return True
+        return False
+
+    def _run(self):
         try:
-            if self.running:
-                self._stop_event.set()
-                if self.thread and self.thread.is_alive():
-                    self.thread.join(1.0)  # 1 saniye bekle
-                self.running = False
-                self.hooked = False
-                self.windows_api.remove_hook(self.window_title, self.pid)
-                log_msg = f"Client durduruldu: {self.window_title} (PID: {self.pid})"
-                self.windows_api.main_window.log(log_msg)
-                write_log(log_msg)
-                return True
-            return False
+            while self.running:
+                current_time = time.time()
+                if current_time >= self.next_send_time:
+                    self.windows_api.send_key(self.window_title, self.key, self.pid)
+                    delay = random.randint(self.min_delay, self.max_delay)
+                    self.next_send_time = current_time + delay
+                    write_log(f"Sonraki gönderim: {delay} saniye sonra - {self.window_title}")
+                time.sleep(0.1)
         except Exception as e:
-            error_msg = f"Client durdurma hatası: {e}"
-            self.windows_api.main_window.log(error_msg)
+            error_msg = f"Client thread hatası: {e}"
             write_log(error_msg)
             write_log(traceback.format_exc())
-            return False
+            self.running = False
 
 class ClientControl(QGroupBox):
-    def __init__(self, process_info, windows_api, parent=None):
+    def __init__(self, process_info, windows_api, main_window):
         window_title, pid = process_info
-        super().__init__(f"{window_title} (PID: {pid})")
-        self.parent = parent
+        super().__init__(f"{window_title}")
         self.client = WowClient(window_title, pid, windows_api)
+        self.windows_api = windows_api
+        self.main_window = main_window
         self.setup_ui()
+        self.windows_api.set_hook(window_title, pid)
         write_log(f"ClientControl oluşturuldu: {window_title} (PID: {pid})")
 
     def setup_ui(self):
@@ -314,17 +179,16 @@ class ClientControl(QGroupBox):
         key_layout.addWidget(QLabel("Tuş:"))
         self.key_input = QLineEdit(self.client.key)
         self.key_input.setMaxLength(1)
-        self.key_input.setFixedWidth(30)
         self.key_input.textChanged.connect(self.update_key)
         key_layout.addWidget(self.key_input)
-        key_layout.addStretch()
         layout.addLayout(key_layout)
         
         # Gecikme ayarı
         delay_layout = QHBoxLayout()
         delay_layout.addWidget(QLabel("Gecikme (sn):"))
         self.min_delay = QSpinBox()
-        self.min_delay.setRange(30, 3600)
+        self.min_delay.setMinimum(30)
+        self.min_delay.setMaximum(3600)
         self.min_delay.setValue(self.client.min_delay)
         self.min_delay.valueChanged.connect(self.update_min_delay)
         delay_layout.addWidget(self.min_delay)
@@ -332,7 +196,8 @@ class ClientControl(QGroupBox):
         delay_layout.addWidget(QLabel("-"))
         
         self.max_delay = QSpinBox()
-        self.max_delay.setRange(30, 3600)
+        self.max_delay.setMinimum(30)
+        self.max_delay.setMaximum(3600)
         self.max_delay.setValue(self.client.max_delay)
         self.max_delay.valueChanged.connect(self.update_max_delay)
         delay_layout.addWidget(self.max_delay)
@@ -347,104 +212,125 @@ class ClientControl(QGroupBox):
         
         # Butonlar
         button_layout = QHBoxLayout()
-        self.start_button = QPushButton("Başlat")
-        self.start_button.clicked.connect(self.start_client)
-        button_layout.addWidget(self.start_button)
         
-        self.stop_button = QPushButton("Durdur")
-        self.stop_button.clicked.connect(self.stop_client)
-        self.stop_button.setEnabled(False)
-        button_layout.addWidget(self.stop_button)
+        self.start_btn = QPushButton("Başlat")
+        self.start_btn.clicked.connect(self.start_client)
+        button_layout.addWidget(self.start_btn)
         
-        self.remove_button = QPushButton("Kaldır")
-        self.remove_button.clicked.connect(self.remove_client)
-        button_layout.addWidget(self.remove_button)
+        self.stop_btn = QPushButton("Durdur")
+        self.stop_btn.clicked.connect(self.stop_client)
+        self.stop_btn.setEnabled(False)
+        button_layout.addWidget(self.stop_btn)
+        
+        self.remove_btn = QPushButton("Kaldır")
+        self.remove_btn.clicked.connect(self.remove_client)
+        button_layout.addWidget(self.remove_btn)
         
         layout.addLayout(button_layout)
         
         self.setLayout(layout)
         
-        # Timer
+        # Timer for progress bar
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_progress)
         self.timer.start(100)  # 100ms
+        
+        write_log(f"ClientControl UI kuruldu: {self.client.window_title}")
 
     def update_key(self, text):
         if text:
             self.client.key = text
-            write_log(f"Tuş güncellendi: {self.client.window_title} -> {text}")
+            write_log(f"Tuş güncellendi: {text} - {self.client.window_title}")
 
     def update_min_delay(self, value):
         self.client.min_delay = value
-        if self.max_delay.value() < value:
+        if self.client.min_delay > self.client.max_delay:
             self.max_delay.setValue(value)
-        write_log(f"Min gecikme güncellendi: {self.client.window_title} -> {value}")
+        write_log(f"Min gecikme güncellendi: {value} - {self.client.window_title}")
 
     def update_max_delay(self, value):
         self.client.max_delay = value
-        if self.min_delay.value() > value:
+        if self.client.max_delay < self.client.min_delay:
             self.min_delay.setValue(value)
-        write_log(f"Max gecikme güncellendi: {self.client.window_title} -> {value}")
-
-    def update_progress(self):
-        if self.client.running and self.client.next_delay > 0:
-            self.client.current_delay += 0.1
-            progress = min(100, int((self.client.current_delay / self.client.next_delay) * 100))
-            self.progress.setValue(progress)
+        write_log(f"Max gecikme güncellendi: {value} - {self.client.window_title}")
 
     def start_client(self):
         try:
             if self.client.start():
-                self.start_button.setEnabled(False)
-                self.stop_button.setEnabled(True)
+                self.start_btn.setEnabled(False)
+                self.stop_btn.setEnabled(True)
                 self.key_input.setEnabled(False)
                 self.min_delay.setEnabled(False)
                 self.max_delay.setEnabled(False)
-                self.remove_button.setEnabled(False)
+                self.remove_btn.setEnabled(False)
+                log_msg = f"Client başlatıldı: {self.client.window_title} (PID: {self.client.pid})"
+                self.main_window.log(log_msg)
+                write_log(log_msg)
         except Exception as e:
             error_msg = f"Client başlatma hatası: {e}"
-            if self.parent:
-                self.parent.log(error_msg)
+            self.main_window.log(error_msg)
             write_log(error_msg)
             write_log(traceback.format_exc())
 
     def stop_client(self):
         try:
             if self.client.stop():
-                self.start_button.setEnabled(True)
-                self.stop_button.setEnabled(False)
+                self.start_btn.setEnabled(True)
+                self.stop_btn.setEnabled(False)
                 self.key_input.setEnabled(True)
                 self.min_delay.setEnabled(True)
                 self.max_delay.setEnabled(True)
-                self.remove_button.setEnabled(True)
-                self.progress.setValue(0)
+                self.remove_btn.setEnabled(True)
+                log_msg = f"Client durduruldu: {self.client.window_title} (PID: {self.client.pid})"
+                self.main_window.log(log_msg)
+                write_log(log_msg)
         except Exception as e:
             error_msg = f"Client durdurma hatası: {e}"
-            if self.parent:
-                self.parent.log(error_msg)
+            self.main_window.log(error_msg)
             write_log(error_msg)
             write_log(traceback.format_exc())
 
     def remove_client(self):
         try:
             self.stop_client()
-            if self.parent:
-                self.parent.remove_client_control(self)
+            self.windows_api.remove_hook(self.client.window_title, self.client.pid)
+            self.timer.stop()
+            self.main_window.remove_client_control(self)
+            log_msg = f"Client kaldırıldı: {self.client.window_title} (PID: {self.client.pid})"
+            self.main_window.log(log_msg)
+            write_log(log_msg)
         except Exception as e:
             error_msg = f"Client kaldırma hatası: {e}"
-            if self.parent:
-                self.parent.log(error_msg)
+            self.main_window.log(error_msg)
+            write_log(error_msg)
+            write_log(traceback.format_exc())
+
+    def update_progress(self):
+        try:
+            if self.client.running and self.client.next_send_time > 0:
+                current_time = time.time()
+                if current_time < self.client.next_send_time:
+                    total_delay = self.client.next_send_time - (self.client.next_send_time - random.randint(self.client.min_delay, self.client.max_delay))
+                    elapsed = total_delay - (self.client.next_send_time - current_time)
+                    percent = min(100, int((elapsed / total_delay) * 100))
+                    self.progress.setValue(percent)
+                else:
+                    self.progress.setValue(100)
+            else:
+                self.progress.setValue(0)
+        except Exception as e:
+            error_msg = f"İlerleme çubuğu hatası: {e}"
             write_log(error_msg)
             write_log(traceback.format_exc())
 
 class ProcessSelector(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("WoW Process Seçici")
-        self.setMinimumWidth(400)
-        self.setMinimumHeight(300)
+        self.setWindowTitle("WoW Client Seçimi")
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(400)
         self.setup_ui()
-        self.populate_process_list()
+        self.load_processes()
         write_log("ProcessSelector oluşturuldu")
 
     def setup_ui(self):
@@ -457,20 +343,21 @@ class ProcessSelector(QDialog):
         
         # Butonlar
         button_layout = QHBoxLayout()
-        select_button = QPushButton("Seç")
-        select_button.clicked.connect(self.accept)
-        cancel_button = QPushButton("İptal")
-        cancel_button.clicked.connect(self.reject)
+        select_btn = QPushButton("Seç")
+        select_btn.clicked.connect(self.accept)
+        button_layout.addWidget(select_btn)
         
-        button_layout.addWidget(select_button)
-        button_layout.addWidget(cancel_button)
+        cancel_btn = QPushButton("İptal")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        
         layout.addLayout(button_layout)
         
         self.setLayout(layout)
+        write_log("ProcessSelector UI kuruldu")
 
-    def populate_process_list(self):
+    def load_processes(self):
         try:
-            self.process_list.clear()
             for proc in psutil.process_iter(['pid', 'name']):
                 try:
                     # WoW process'lerini bul
