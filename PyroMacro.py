@@ -34,11 +34,58 @@ def write_log(message):
 # Başlangıç logunu yaz
 write_log("=== Uygulama başlatılıyor ===")
 
+# Düşük seviyeli klavye girişi için
+user32 = ctypes.WinDLL('user32', use_last_error=True)
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+# Sabitler
+KEYEVENTF_EXTENDEDKEY = 0x0001
+KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_SCANCODE = 0x0008
+KEYEVENTF_UNICODE = 0x0004
+INPUT_KEYBOARD = 1
+MAPVK_VK_TO_VSC = 0
+
+# Yapılar
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = (("dx", wintypes.LONG),
+                ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", wintypes.PULONG))
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = (("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", wintypes.PULONG))
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = (("uMsg", wintypes.DWORD),
+                ("wParamL", wintypes.WORD),
+                ("wParamH", wintypes.WORD))
+
+class INPUT(ctypes.Structure):
+    class _INPUT(ctypes.Union):
+        _fields_ = (("ki", KEYBDINPUT),
+                    ("mi", MOUSEINPUT),
+                    ("hi", HARDWAREINPUT))
+    _anonymous_ = ("_input",)
+    _fields_ = (("type", wintypes.DWORD),
+                ("_input", _INPUT))
+
+# Fonksiyon prototipleri
+user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
+user32.SendInput.restype = wintypes.UINT
+user32.GetMessageExtraInfo.restype = wintypes.LPARAM
+user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
+user32.MapVirtualKeyW.restype = wintypes.UINT
+
 class WindowsAPI:
     def __init__(self, main_window):
         self.main_window = main_window
-        self.user32 = ctypes.windll.user32
-        self.kernel32 = ctypes.windll.kernel32
         self._target_windows = {}  # window_title: hwnd
         write_log("WindowsAPI başlatıldı")
 
@@ -55,31 +102,53 @@ class WindowsAPI:
         # Normal tuşlar için
         return ord(key.upper())
 
+    def _send_key_input(self, vk_code, scan_code=0, flags=0):
+        """Düşük seviyeli tuş gönderme"""
+        if not scan_code:
+            scan_code = user32.MapVirtualKeyW(vk_code, MAPVK_VK_TO_VSC)
+        
+        extra = user32.GetMessageExtraInfo()
+        
+        # Tuşa basma
+        i = INPUT(type=INPUT_KEYBOARD, 
+                  ki=KEYBDINPUT(wVk=vk_code, 
+                                wScan=scan_code, 
+                                dwFlags=flags, 
+                                time=0, 
+                                dwExtraInfo=extra))
+        user32.SendInput(1, ctypes.byref(i), ctypes.sizeof(i))
+        
+        # Tuşu bırakma
+        i = INPUT(type=INPUT_KEYBOARD, 
+                  ki=KEYBDINPUT(wVk=vk_code, 
+                                wScan=scan_code, 
+                                dwFlags=flags | KEYEVENTF_KEYUP, 
+                                time=0, 
+                                dwExtraInfo=extra))
+        user32.SendInput(1, ctypes.byref(i), ctypes.sizeof(i))
+
     def send_key(self, window_title, key, pid):
         try:
             hwnd = win32gui.FindWindow(None, window_title)
             if hwnd:
                 vk_code = self._key_to_vk(key)
                 
-                # Pencere thread'ini bul
-                target_thread_id = win32process.GetWindowThreadProcessId(hwnd)[0]
+                # Mevcut aktif pencereyi kaydedelim
+                current_hwnd = user32.GetForegroundWindow()
                 
-                # Tuşu gönder (PostThreadMessage kullanarak)
-                result = self.user32.PostThreadMessageW(
-                    target_thread_id, 
-                    win32con.WM_KEYDOWN, 
-                    vk_code, 
-                    0
-                )
+                # Hedef pencereyi aktif yapalım
+                user32.SetForegroundWindow(hwnd)
+                
+                # Kısa bir bekleme
                 time.sleep(0.05)
-                result2 = self.user32.PostThreadMessageW(
-                    target_thread_id, 
-                    win32con.WM_KEYUP, 
-                    vk_code, 
-                    0
-                )
                 
-                log_msg = f"Tuş gönderildi: {key} -> {window_title} (PID: {pid}, ThreadID: {target_thread_id}) - Sonuç: {result},{result2}"
+                # Tuşu gönder
+                self._send_key_input(vk_code)
+                
+                # Önceki pencereyi geri aktif yapalım
+                user32.SetForegroundWindow(current_hwnd)
+                
+                log_msg = f"Tuş gönderildi: {key} -> {window_title} (PID: {pid})"
                 self.main_window.log(log_msg)
                 write_log(log_msg)
                 return True
@@ -238,56 +307,56 @@ class ClientControl(QGroupBox):
         key_layout = QHBoxLayout()
         key_layout.addWidget(QLabel("Tuş:"))
         self.key_input = QLineEdit(self.client.key)
-        self.key_input.setMaxLength(3)  # F10 gibi tuşlar için 3 karakter
-        self.key_input.setFixedWidth(50)
+        self.key_input.setMaxLength(1)
+        self.key_input.setFixedWidth(30)
         key_layout.addWidget(self.key_input)
         key_layout.addStretch()
         layout.addLayout(key_layout)
 
-        # Orta kısım - Gecikme ayarları
-        delay_layout = QGridLayout()
-        delay_layout.addWidget(QLabel("Min Gecikme (sn):"), 0, 0)
+        # Gecikme ayarları
+        delay_layout = QHBoxLayout()
+        delay_layout.addWidget(QLabel("Gecikme (sn):"))
         self.min_delay = QSpinBox()
-        self.min_delay.setRange(1, 3600)
+        self.min_delay.setRange(30, 3600)
         self.min_delay.setValue(self.client.min_delay)
-        delay_layout.addWidget(self.min_delay, 0, 1)
-
-        delay_layout.addWidget(QLabel("Max Gecikme (sn):"), 1, 0)
+        delay_layout.addWidget(self.min_delay)
+        
+        delay_layout.addWidget(QLabel("-"))
+        
         self.max_delay = QSpinBox()
-        self.max_delay.setRange(1, 3600)
+        self.max_delay.setRange(30, 3600)
         self.max_delay.setValue(self.client.max_delay)
-        delay_layout.addWidget(self.max_delay, 1, 1)
+        delay_layout.addWidget(self.max_delay)
+        
+        delay_layout.addStretch()
         layout.addLayout(delay_layout)
 
-        # Progress Bar
+        # İlerleme çubuğu
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         layout.addWidget(self.progress)
 
-        # Alt kısım - Butonlar
+        # Butonlar
         button_layout = QHBoxLayout()
         self.start_button = QPushButton("Başlat")
         self.start_button.clicked.connect(self.toggle_client)
-        self.remove_button = QPushButton("Kaldır")
-        self.remove_button.clicked.connect(self.remove_client)
-        
         button_layout.addWidget(self.start_button)
-        button_layout.addWidget(self.remove_button)
+        
+        remove_button = QPushButton("Kaldır")
+        remove_button.clicked.connect(self.remove_client)
+        button_layout.addWidget(remove_button)
+        
         layout.addLayout(button_layout)
 
         self.setLayout(layout)
-
-    def update_progress(self):
-        if self.client.running and self.client.next_delay > 0:
-            self.client.current_delay += 0.1
-            progress = (self.client.current_delay / self.client.next_delay) * 100
-            self.progress.setValue(min(int(progress), 100))
+        self.setFixedWidth(250)
+        self.setFixedHeight(180)
 
     def toggle_client(self):
         try:
             if not self.client.running:
-                self.client.key = self.key_input.text()
+                self.client.key = self.key_input.text() or '1'
                 self.client.min_delay = self.min_delay.value()
                 self.client.max_delay = self.max_delay.value()
                 self.client.start()
@@ -296,10 +365,7 @@ class ClientControl(QGroupBox):
             else:
                 self.stop_client()
         except Exception as e:
-            error_msg = f"Client toggle hatası (PID: {self.client.pid}): {e}"
-            self.window().log(error_msg)
-            write_log(error_msg)
-            write_log(traceback.format_exc())
+            self.window().log(f"Client toggle hatası (PID: {self.client.pid}): {e}")
             self.stop_client()
 
     def stop_client(self):
@@ -309,10 +375,13 @@ class ClientControl(QGroupBox):
             self.timer.stop()
             self.progress.setValue(0)
         except Exception as e:
-            error_msg = f"Client durdurma hatası (PID: {self.client.pid}): {e}"
-            self.window().log(error_msg)
-            write_log(error_msg)
-            write_log(traceback.format_exc())
+            self.window().log(f"Client durdurma hatası (PID: {self.client.pid}): {e}")
+
+    def update_progress(self):
+        if self.client.running and self.client.next_delay > 0:
+            self.client.current_delay += 0.1
+            progress = (self.client.current_delay / self.client.next_delay) * 100
+            self.progress.setValue(min(int(progress), 100))
 
     def remove_client(self):
         try:
@@ -330,10 +399,7 @@ class ClientControl(QGroupBox):
                 self.deleteLater()
             
         except Exception as e:
-            error_msg = f"Client kaldırma hatası (PID: {self.client.pid}): {e}"
-            self.window().log(error_msg)
-            write_log(error_msg)
-            write_log(traceback.format_exc())
+            self.window().log(f"Client kaldırma hatası (PID: {self.client.pid}): {e}")
 
 class ProcessSelector(QDialog):
     def __init__(self, parent=None):
