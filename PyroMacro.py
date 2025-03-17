@@ -61,15 +61,31 @@ class WindowsAPI:
             if hwnd:
                 vk_code = self._key_to_vk(key)
                 
-                # WM_KEYDOWN ve WM_KEYUP mesajlarını gönder
-                result = win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, vk_code, 0)
-                time.sleep(0.05)
-                result2 = win32api.SendMessage(hwnd, win32con.WM_KEYUP, vk_code, 0)
+                # Pencere thread'ini bul
+                target_thread_id, target_process_id = win32process.GetWindowThreadProcessId(hwnd)
                 
-                log_msg = f"Tuş gönderildi: {key} -> {window_title} (PID: {pid}) - Sonuç: {result},{result2}"
-                self.main_window.log(log_msg)
-                write_log(log_msg)
-                return True
+                # Mevcut thread'i bul
+                current_thread_id = win32api.GetCurrentThreadId()
+                
+                # Thread'leri bağla (attach)
+                attached = self.user32.AttachThreadInput(current_thread_id, target_thread_id, True)
+                
+                try:
+                    # Tuşu gönder
+                    self.user32.PostMessageW(hwnd, win32con.WM_KEYDOWN, vk_code, 0)
+                    time.sleep(0.05)
+                    self.user32.PostMessageW(hwnd, win32con.WM_KEYUP, vk_code, 0)
+                    
+                    log_msg = f"Tuş gönderildi: {key} -> {window_title} (PID: {pid}) - Thread bağlama: {attached}"
+                    self.main_window.log(log_msg)
+                    write_log(log_msg)
+                    return True
+                finally:
+                    # Thread'leri ayır (detach)
+                    if attached:
+                        self.user32.AttachThreadInput(current_thread_id, target_thread_id, False)
+                
+                return False
             return False
         except Exception as e:
             error_msg = f"Tuş gönderme hatası: {e}"
@@ -204,38 +220,44 @@ class ClientControl(QGroupBox):
         
         layout.addLayout(delay_layout)
         
+        # Sonraki gönderim zamanı
+        self.next_send_label = QLabel("Sonraki: -")
+        layout.addWidget(self.next_send_label)
+        
         # İlerleme çubuğu
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        layout.addWidget(self.progress)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
         
         # Butonlar
         button_layout = QHBoxLayout()
         
-        self.start_btn = QPushButton("Başlat")
-        self.start_btn.clicked.connect(self.start_client)
-        button_layout.addWidget(self.start_btn)
+        self.start_button = QPushButton("Başlat")
+        self.start_button.clicked.connect(self.start_client)
+        button_layout.addWidget(self.start_button)
         
-        self.stop_btn = QPushButton("Durdur")
-        self.stop_btn.clicked.connect(self.stop_client)
-        self.stop_btn.setEnabled(False)
-        button_layout.addWidget(self.stop_btn)
+        self.stop_button = QPushButton("Durdur")
+        self.stop_button.clicked.connect(self.stop_client)
+        self.stop_button.setEnabled(False)
+        button_layout.addWidget(self.stop_button)
         
-        self.remove_btn = QPushButton("Kaldır")
-        self.remove_btn.clicked.connect(self.remove_client)
-        button_layout.addWidget(self.remove_btn)
+        self.test_button = QPushButton("Test")
+        self.test_button.clicked.connect(self.test_client)
+        button_layout.addWidget(self.test_button)
+        
+        self.remove_button = QPushButton("Kaldır")
+        self.remove_button.clicked.connect(self.remove_client)
+        button_layout.addWidget(self.remove_button)
         
         layout.addLayout(button_layout)
         
         self.setLayout(layout)
         
-        # Timer for progress bar
+        # Timer for updating UI
         self.timer = QTimer()
-        self.timer.timeout.connect(self.update_progress)
+        self.timer.timeout.connect(self.update_ui)
         self.timer.start(100)  # 100ms
-        
-        write_log(f"ClientControl UI kuruldu: {self.client.window_title}")
 
     def update_key(self, text):
         if text:
@@ -255,44 +277,30 @@ class ClientControl(QGroupBox):
         write_log(f"Max gecikme güncellendi: {value} - {self.client.window_title}")
 
     def start_client(self):
-        try:
-            if self.client.start():
-                self.start_btn.setEnabled(False)
-                self.stop_btn.setEnabled(True)
-                self.key_input.setEnabled(False)
-                self.min_delay.setEnabled(False)
-                self.max_delay.setEnabled(False)
-                self.remove_btn.setEnabled(False)
-                log_msg = f"Client başlatıldı: {self.client.window_title} (PID: {self.client.pid})"
-                self.main_window.log(log_msg)
-                write_log(log_msg)
-        except Exception as e:
-            error_msg = f"Client başlatma hatası: {e}"
-            self.main_window.log(error_msg)
-            write_log(error_msg)
-            write_log(traceback.format_exc())
+        if self.client.start():
+            self.start_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
+            log_msg = f"Client başlatıldı: {self.client.window_title} (PID: {self.client.pid})"
+            self.main_window.log(log_msg)
+            write_log(log_msg)
 
     def stop_client(self):
-        try:
-            if self.client.stop():
-                self.start_btn.setEnabled(True)
-                self.stop_btn.setEnabled(False)
-                self.key_input.setEnabled(True)
-                self.min_delay.setEnabled(True)
-                self.max_delay.setEnabled(True)
-                self.remove_btn.setEnabled(True)
-                log_msg = f"Client durduruldu: {self.client.window_title} (PID: {self.client.pid})"
-                self.main_window.log(log_msg)
-                write_log(log_msg)
-        except Exception as e:
-            error_msg = f"Client durdurma hatası: {e}"
-            self.main_window.log(error_msg)
-            write_log(error_msg)
-            write_log(traceback.format_exc())
+        if self.client.stop():
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            log_msg = f"Client durduruldu: {self.client.window_title} (PID: {self.client.pid})"
+            self.main_window.log(log_msg)
+            write_log(log_msg)
+
+    def test_client(self):
+        self.client.windows_api.send_key(self.client.window_title, self.client.key, self.client.pid)
+        log_msg = f"Test tuşu gönderildi: {self.client.key} -> {self.client.window_title} (PID: {self.client.pid})"
+        self.main_window.log(log_msg)
+        write_log(log_msg)
 
     def remove_client(self):
         try:
-            self.stop_client()
+            self.client.stop()
             self.windows_api.remove_hook(self.client.window_title, self.client.pid)
             self.timer.stop()
             self.main_window.remove_client_control(self)
@@ -305,30 +313,32 @@ class ClientControl(QGroupBox):
             write_log(error_msg)
             write_log(traceback.format_exc())
 
-    def update_progress(self):
+    def update_ui(self):
         try:
             if self.client.running and self.client.next_send_time > 0:
                 current_time = time.time()
-                if current_time < self.client.next_send_time:
-                    total_delay = self.client.next_send_time - (self.client.next_send_time - random.randint(self.client.min_delay, self.client.max_delay))
-                    elapsed = total_delay - (self.client.next_send_time - current_time)
-                    percent = min(100, int((elapsed / total_delay) * 100))
-                    self.progress.setValue(percent)
-                else:
-                    self.progress.setValue(100)
+                remaining = max(0, self.client.next_send_time - current_time)
+                total = self.client.max_delay
+                
+                # Kalan süreyi göster
+                minutes, seconds = divmod(int(remaining), 60)
+                self.next_send_label.setText(f"Sonraki: {minutes:02d}:{seconds:02d}")
+                
+                # İlerleme çubuğunu güncelle
+                progress = 100 - min(100, int(remaining / total * 100))
+                self.progress_bar.setValue(progress)
             else:
-                self.progress.setValue(0)
+                self.next_send_label.setText("Sonraki: -")
+                self.progress_bar.setValue(0)
         except Exception as e:
-            error_msg = f"İlerleme çubuğu hatası: {e}"
+            error_msg = f"UI güncelleme hatası: {e}"
             write_log(error_msg)
-            write_log(traceback.format_exc())
 
 class ProcessSelector(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("WoW Client Seçimi")
-        self.setMinimumWidth(500)
-        self.setMinimumHeight(400)
+        self.setWindowTitle("WoW Process Seçici")
+        self.setMinimumSize(500, 400)
         self.setup_ui()
         self.load_processes()
         write_log("ProcessSelector oluşturuldu")
@@ -343,21 +353,20 @@ class ProcessSelector(QDialog):
         
         # Butonlar
         button_layout = QHBoxLayout()
-        select_btn = QPushButton("Seç")
-        select_btn.clicked.connect(self.accept)
-        button_layout.addWidget(select_btn)
+        select_button = QPushButton("Seç")
+        select_button.clicked.connect(self.accept)
+        button_layout.addWidget(select_button)
         
-        cancel_btn = QPushButton("İptal")
-        cancel_btn.clicked.connect(self.reject)
-        button_layout.addWidget(cancel_btn)
+        cancel_button = QPushButton("İptal")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
         
         layout.addLayout(button_layout)
-        
         self.setLayout(layout)
-        write_log("ProcessSelector UI kuruldu")
 
     def load_processes(self):
         try:
+            self.process_list.clear()
             for proc in psutil.process_iter(['pid', 'name']):
                 try:
                     # WoW process'lerini bul
